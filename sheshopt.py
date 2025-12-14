@@ -38,240 +38,223 @@ def calculate_greeks(S, K, T, r, sigma, opt_type='call'):
     rho = K*T*np.exp(-r*T)*(norm.cdf(d1-sigma*np.sqrt(T)) if opt_type=='call' else -norm.cdf(-(d1-sigma*np.sqrt(T))))/100
     return {'delta': delta, 'gamma': gamma, 'theta': theta, 'vega': vega, 'rho': rho}
 
-@st.cache_data(ttl=60)
-def fetch_nse_options(symbol):
-    """Fetch REAL NSE options data"""
+def get_nse_session():
+    """Create NSE session with proper cookies"""
+    session = requests.Session()
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://www.nseindia.com/',
+        'Connection': 'keep-alive'
+    }
+    session.headers.update(headers)
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.nseindia.com/'
-        }
+        session.get("https://www.nseindia.com/option-chain", timeout=10)
+        time.sleep(2)
+        return session
+    except:
+        return None
+
+@st.cache_data(ttl=30)
+def fetch_nse_options(symbol, is_index=False):
+    """Fetch NSE options with improved error handling"""
+    try:
+        session = get_nse_session()
+        if not session:
+            return None, None, "Failed to establish NSE session"
         
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
-        time.sleep(1)
+        if is_index:
+            url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+        else:
+            url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
         
-        url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
-        response = session.get(url, headers=headers, timeout=15)
+        response = session.get(url, timeout=15)
         
         if response.status_code == 200:
             data = response.json()
             
-            if 'records' in data and 'data' in data['records']:
-                options_data = []
-                spot_price = data['records'].get('underlyingValue', 0)
-                
-                for item in data['records']['data']:
-                    expiry = item.get('expiryDate', '')
-                    strike = item.get('strikePrice', 0)
-                    
-                    exp_date = datetime.strptime(expiry, '%d-%b-%Y') if expiry else datetime.now()
-                    days_to_expiry = (exp_date - datetime.now()).days
-                    
-                    if 'CE' in item:
-                        ce = item['CE']
-                        options_data.append({
-                            'Option Code': f"{symbol} {expiry} {strike} CE",
-                            'Symbol': symbol,
-                            'Spot Price': spot_price,
-                            'Strike': strike,
-                            'Type': 'CALL',
-                            'Expiry': expiry,
-                            'Days to Expiry': days_to_expiry,
-                            'LTP': ce.get('lastPrice', 0),
-                            'Bid': ce.get('bidprice', 0),
-                            'Ask': ce.get('askPrice', 0),
-                            'Volume': ce.get('totalTradedVolume', 0),
-                            'OI': ce.get('openInterest', 0),
-                            'Change in OI': ce.get('changeinOpenInterest', 0),
-                            'IV': ce.get('impliedVolatility', 0),
-                            'ITM': spot_price > strike
-                        })
-                    
-                    if 'PE' in item:
-                        pe = item['PE']
-                        options_data.append({
-                            'Option Code': f"{symbol} {expiry} {strike} PE",
-                            'Symbol': symbol,
-                            'Spot Price': spot_price,
-                            'Strike': strike,
-                            'Type': 'PUT',
-                            'Expiry': expiry,
-                            'Days to Expiry': days_to_expiry,
-                            'LTP': pe.get('lastPrice', 0),
-                            'Bid': pe.get('bidprice', 0),
-                            'Ask': pe.get('askPrice', 0),
-                            'Volume': pe.get('totalTradedVolume', 0),
-                            'OI': pe.get('openInterest', 0),
-                            'Change in OI': pe.get('changeinOpenInterest', 0),
-                            'IV': pe.get('impliedVolatility', 0),
-                            'ITM': spot_price < strike
-                        })
-                
-                return pd.DataFrame(options_data), spot_price
-    except Exception as e:
-        st.error(f"NSE Error: {str(e)}")
-    
-    return None, None
-
-@st.cache_data(ttl=60)
-def fetch_nse_index_options(symbol):
-    """Fetch REAL NSE Index options (NIFTY, BANKNIFTY, etc.)"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.nseindia.com/'
-        }
-        
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
-        time.sleep(1)
-        
-        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-        response = session.get(url, headers=headers, timeout=15)
-        
-        if response.status_code == 200:
-            data = response.json()
+            if 'records' not in data or 'data' not in data['records']:
+                return None, None, "No option chain data available"
             
-            if 'records' in data and 'data' in data['records']:
-                options_data = []
-                spot_price = data['records'].get('underlyingValue', 0)
+            options_data = []
+            spot_price = data['records'].get('underlyingValue', 0)
+            
+            if spot_price == 0:
+                return None, None, "Could not fetch underlying price"
+            
+            for item in data['records']['data']:
+                expiry = item.get('expiryDate', '')
+                strike = item.get('strikePrice', 0)
                 
-                for item in data['records']['data']:
-                    expiry = item.get('expiryDate', '')
-                    strike = item.get('strikePrice', 0)
-                    
-                    exp_date = datetime.strptime(expiry, '%d-%b-%Y') if expiry else datetime.now()
-                    days_to_expiry = (exp_date - datetime.now()).days
-                    
-                    if 'CE' in item:
-                        ce = item['CE']
-                        options_data.append({
-                            'Option Code': f"{symbol} {expiry} {strike} CE",
-                            'Symbol': symbol,
-                            'Spot Price': spot_price,
-                            'Strike': strike,
-                            'Type': 'CALL',
-                            'Expiry': expiry,
-                            'Days to Expiry': days_to_expiry,
-                            'LTP': ce.get('lastPrice', 0),
-                            'Bid': ce.get('bidprice', 0),
-                            'Ask': ce.get('askPrice', 0),
-                            'Volume': ce.get('totalTradedVolume', 0),
-                            'OI': ce.get('openInterest', 0),
-                            'Change in OI': ce.get('changeinOpenInterest', 0),
-                            'IV': ce.get('impliedVolatility', 0),
-                            'ITM': spot_price > strike
-                        })
-                    
-                    if 'PE' in item:
-                        pe = item['PE']
-                        options_data.append({
-                            'Option Code': f"{symbol} {expiry} {strike} PE",
-                            'Symbol': symbol,
-                            'Spot Price': spot_price,
-                            'Strike': strike,
-                            'Type': 'PUT',
-                            'Expiry': expiry,
-                            'Days to Expiry': days_to_expiry,
-                            'LTP': pe.get('lastPrice', 0),
-                            'Bid': pe.get('bidprice', 0),
-                            'Ask': pe.get('askPrice', 0),
-                            'Volume': pe.get('totalTradedVolume', 0),
-                            'OI': pe.get('openInterest', 0),
-                            'Change in OI': pe.get('changeinOpenInterest', 0),
-                            'IV': pe.get('impliedVolatility', 0),
-                            'ITM': spot_price < strike
-                        })
+                if not expiry or strike == 0:
+                    continue
                 
-                return pd.DataFrame(options_data), spot_price
-    except Exception as e:
-        st.error(f"NSE Index Error: {str(e)}")
+                try:
+                    exp_date = datetime.strptime(expiry, '%d-%b-%Y')
+                except:
+                    continue
+                
+                days_to_expiry = (exp_date - datetime.now()).days
+                
+                if 'CE' in item:
+                    ce = item['CE']
+                    options_data.append({
+                        'Option Code': f"{symbol} {expiry} {strike} CE",
+                        'Symbol': symbol,
+                        'Spot Price': spot_price,
+                        'Strike': strike,
+                        'Type': 'CALL',
+                        'Expiry': expiry,
+                        'Days to Expiry': days_to_expiry,
+                        'LTP': ce.get('lastPrice', 0),
+                        'Change': ce.get('change', 0),
+                        'Pct Change': ce.get('pchangeinOpenInterest', 0),
+                        'Bid': ce.get('bidprice', 0),
+                        'Ask': ce.get('askPrice', 0),
+                        'Volume': ce.get('totalTradedVolume', 0),
+                        'OI': ce.get('openInterest', 0),
+                        'Change in OI': ce.get('changeinOpenInterest', 0),
+                        'IV': ce.get('impliedVolatility', 0),
+                        'ITM': spot_price > strike
+                    })
+                
+                if 'PE' in item:
+                    pe = item['PE']
+                    options_data.append({
+                        'Option Code': f"{symbol} {expiry} {strike} PE",
+                        'Symbol': symbol,
+                        'Spot Price': spot_price,
+                        'Strike': strike,
+                        'Type': 'PUT',
+                        'Expiry': expiry,
+                        'Days to Expiry': days_to_expiry,
+                        'LTP': pe.get('lastPrice', 0),
+                        'Change': pe.get('change', 0),
+                        'Pct Change': pe.get('pchangeinOpenInterest', 0),
+                        'Bid': pe.get('bidprice', 0),
+                        'Ask': pe.get('askPrice', 0),
+                        'Volume': pe.get('totalTradedVolume', 0),
+                        'OI': pe.get('openInterest', 0),
+                        'Change in OI': pe.get('changeinOpenInterest', 0),
+                        'IV': pe.get('impliedVolatility', 0),
+                        'ITM': spot_price < strike
+                    })
+            
+            if not options_data:
+                return None, None, "No options contracts found in data"
+            
+            return pd.DataFrame(options_data), spot_price, None
+        
+        elif response.status_code == 401:
+            return None, None, "NSE API: Unauthorized - Try again in a few seconds"
+        elif response.status_code == 403:
+            return None, None, "NSE API: Access forbidden - Rate limited"
+        else:
+            return None, None, f"NSE API returned status code: {response.status_code}"
     
-    return None, None
+    except requests.exceptions.Timeout:
+        return None, None, "Request timeout - NSE server slow"
+    except requests.exceptions.ConnectionError:
+        return None, None, "Connection error - Check internet"
+    except Exception as e:
+        return None, None, f"Error: {str(e)}"
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def fetch_yahoo_options(symbol):
-    """Fetch REAL options from Yahoo Finance (US & Global)"""
+    """Fetch Yahoo Finance options"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
         url = f"https://query2.finance.yahoo.com/v7/finance/options/{symbol}"
         response = requests.get(url, headers=headers, timeout=15)
         
         if response.status_code == 200:
             data = response.json()
             
-            if 'optionChain' in data and 'result' in data['optionChain'] and data['optionChain']['result']:
-                result = data['optionChain']['result'][0]
+            if 'optionChain' not in data or 'result' not in data['optionChain']:
+                return None, None, "No option chain data"
+            
+            result = data['optionChain']['result']
+            if not result or 'options' not in result[0]:
+                return None, None, f"No options available for {symbol}"
+            
+            result = result[0]
+            quote = result.get('quote', {})
+            spot_price = quote.get('regularMarketPrice', 0)
+            
+            if spot_price == 0:
+                return None, None, "Could not fetch stock price"
+            
+            options_data = []
+            
+            for option in result['options']:
+                exp_timestamp = option.get('expirationDate', 0)
+                exp_date = datetime.fromtimestamp(exp_timestamp)
+                exp_label = exp_date.strftime("%d-%b-%Y")
+                days_to_expiry = (exp_date - datetime.now()).days
                 
-                if 'options' not in result or not result['options']:
-                    return None, None
+                for call in option.get('calls', []):
+                    options_data.append({
+                        'Option Code': f"{symbol} {exp_label} {call.get('strike', 0):.2f} CE",
+                        'Symbol': symbol,
+                        'Spot Price': spot_price,
+                        'Strike': call.get('strike', 0),
+                        'Type': 'CALL',
+                        'Expiry': exp_label,
+                        'Days to Expiry': days_to_expiry,
+                        'LTP': call.get('lastPrice', 0),
+                        'Change': call.get('change', 0),
+                        'Pct Change': call.get('percentChange', 0),
+                        'Bid': call.get('bid', 0),
+                        'Ask': call.get('ask', 0),
+                        'Volume': call.get('volume', 0),
+                        'OI': call.get('openInterest', 0),
+                        'Change in OI': 0,
+                        'IV': call.get('impliedVolatility', 0) * 100,
+                        'ITM': call.get('inTheMoney', False)
+                    })
                 
-                quote = result.get('quote', {})
-                spot_price = quote.get('regularMarketPrice', 0)
-                
-                options_data = []
-                
-                for option in result['options']:
-                    exp_timestamp = option.get('expirationDate', 0)
-                    exp_date = datetime.fromtimestamp(exp_timestamp)
-                    exp_label = exp_date.strftime("%d-%b-%Y")
-                    days_to_expiry = (exp_date - datetime.now()).days
-                    
-                    for call in option.get('calls', []):
-                        options_data.append({
-                            'Option Code': f"{symbol} {exp_label} {call.get('strike', 0)} CE",
-                            'Symbol': symbol,
-                            'Spot Price': spot_price,
-                            'Strike': call.get('strike', 0),
-                            'Type': 'CALL',
-                            'Expiry': exp_label,
-                            'Days to Expiry': days_to_expiry,
-                            'LTP': call.get('lastPrice', 0),
-                            'Bid': call.get('bid', 0),
-                            'Ask': call.get('ask', 0),
-                            'Volume': call.get('volume', 0),
-                            'OI': call.get('openInterest', 0),
-                            'Change in OI': 0,
-                            'IV': call.get('impliedVolatility', 0) * 100,
-                            'ITM': call.get('inTheMoney', False)
-                        })
-                    
-                    for put in option.get('puts', []):
-                        options_data.append({
-                            'Option Code': f"{symbol} {exp_label} {put.get('strike', 0)} PE",
-                            'Symbol': symbol,
-                            'Spot Price': spot_price,
-                            'Strike': put.get('strike', 0),
-                            'Type': 'PUT',
-                            'Expiry': exp_label,
-                            'Days to Expiry': days_to_expiry,
-                            'LTP': put.get('lastPrice', 0),
-                            'Bid': put.get('bid', 0),
-                            'Ask': put.get('ask', 0),
-                            'Volume': put.get('volume', 0),
-                            'OI': put.get('openInterest', 0),
-                            'Change in OI': 0,
-                            'IV': put.get('impliedVolatility', 0) * 100,
-                            'ITM': put.get('inTheMoney', False)
-                        })
-                
-                return pd.DataFrame(options_data), spot_price
-    except Exception as e:
-        st.error(f"Yahoo Error: {str(e)}")
+                for put in option.get('puts', []):
+                    options_data.append({
+                        'Option Code': f"{symbol} {exp_label} {put.get('strike', 0):.2f} PE",
+                        'Symbol': symbol,
+                        'Spot Price': spot_price,
+                        'Strike': put.get('strike', 0),
+                        'Type': 'PUT',
+                        'Expiry': exp_label,
+                        'Days to Expiry': days_to_expiry,
+                        'LTP': put.get('lastPrice', 0),
+                        'Change': put.get('change', 0),
+                        'Pct Change': put.get('percentChange', 0),
+                        'Bid': put.get('bid', 0),
+                        'Ask': put.get('ask', 0),
+                        'Volume': put.get('volume', 0),
+                        'OI': put.get('openInterest', 0),
+                        'Change in OI': 0,
+                        'IV': put.get('impliedVolatility', 0) * 100,
+                        'ITM': put.get('inTheMoney', False)
+                    })
+            
+            if not options_data:
+                return None, None, "No option contracts found"
+            
+            return pd.DataFrame(options_data), spot_price, None
+        else:
+            return None, None, f"Yahoo returned status: {response.status_code}"
     
-    return None, None
+    except Exception as e:
+        return None, None, f"Error: {str(e)}"
 
 def add_theoretical_greeks(df, r=0.065):
-    """Add theoretical prices and Greeks to real options data"""
+    """Add Greeks to dataframe"""
     for idx, row in df.iterrows():
         S = row['Spot Price']
         K = row['Strike']
-        T = row['Days to Expiry'] / 365.0
+        T = max(row['Days to Expiry'], 0) / 365.0
         sigma = row['IV'] / 100 if row['IV'] > 0 else 0.30
         opt_type = 'call' if row['Type'] == 'CALL' else 'put'
         
@@ -281,7 +264,7 @@ def add_theoretical_greeks(df, r=0.065):
         
         df.at[idx, 'Theoretical'] = theo
         df.at[idx, 'Intrinsic'] = intrinsic
-        df.at[idx, 'Time Value'] = theo - intrinsic
+        df.at[idx, 'Time Value'] = max(theo - intrinsic, 0)
         df.at[idx, 'Delta'] = greeks['delta']
         df.at[idx, 'Gamma'] = greeks['gamma']
         df.at[idx, 'Theta'] = greeks['theta']
@@ -289,101 +272,118 @@ def add_theoretical_greeks(df, r=0.065):
     
     return df
 
-st.title("📊 REAL Options Data - Live from Exchanges")
-st.markdown("**Fetch actual traded options from NSE, BSE, and global exchanges**")
+st.title("📊 Real Options Data from Exchanges")
 
-st.warning("⚠️ **IMPORTANT:** This fetches REAL options contracts that are actually traded on exchanges. No fake/generated data!")
+st.info("🔥 **Working Data Sources:** Yahoo Finance (US/Global stocks) works reliably. NSE may have intermittent access issues due to their API restrictions.")
 
-tab1, tab2, tab3 = st.tabs(["🇮🇳 NSE Stocks", "📈 NSE Indices (NIFTY/BANKNIFTY)", "🌍 US & Global (Yahoo)"])
+tab1, tab2, tab3 = st.tabs(["🇮🇳 NSE Stocks", "📈 NSE Indices", "🌍 US & Global"])
 
 with tab1:
     st.subheader("NSE Stock Options")
-    st.info("Examples: RELIANCE, TCS, INFY, SBIN, HDFCBANK, ICICIBANK, etc.")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        nse_stock = st.text_input("NSE Stock Symbol", "RELIANCE", help="Examples: RELIANCE, TCS, INFY, SBIN, HDFCBANK").upper()
+    with col2:
+        st.write("")
+        st.write("")
+        nse_stock_btn = st.button("Fetch NSE Stock", type="primary", key="btn1")
     
-    nse_symbol = st.text_input("Enter NSE Stock Symbol", "RELIANCE", key="nse_stock").upper()
-    
-    if st.button("Fetch NSE Stock Options", type="primary", key="btn_nse"):
-        with st.spinner(f"Fetching REAL options for {nse_symbol} from NSE..."):
-            df, spot = fetch_nse_options(nse_symbol)
+    if nse_stock_btn:
+        with st.spinner(f"Fetching {nse_stock} options from NSE..."):
+            df, spot, error = fetch_nse_options(nse_stock, is_index=False)
             
-            if df is not None and not df.empty:
-                st.success(f"✅ Fetched {len(df)} REAL traded options! Spot: ₹{spot:.2f}")
+            if df is not None:
+                st.success(f"✅ Fetched {len(df)} options! Spot: ₹{spot:.2f}")
                 df = add_theoretical_greeks(df)
-                st.session_state['options_df'] = df
+                st.session_state['df'] = df
                 st.session_state['spot'] = spot
             else:
-                st.error("❌ No options data found. Check symbol or try again.")
+                st.error(f"❌ {error}")
+                st.info("💡 NSE API has strict access controls. If this fails, try: 1) Wait 30 seconds and retry, 2) Use US stocks tab instead, 3) Clear cache and retry")
 
 with tab2:
     st.subheader("NSE Index Options")
-    st.info("Examples: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        nse_index = st.selectbox("Select Index", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
+    with col2:
+        st.write("")
+        st.write("")
+        nse_index_btn = st.button("Fetch Index", type="primary", key="btn2")
     
-    index_symbol = st.selectbox("Select Index", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"], key="nse_index")
-    
-    if st.button("Fetch Index Options", type="primary", key="btn_index"):
-        with st.spinner(f"Fetching REAL options for {index_symbol} from NSE..."):
-            df, spot = fetch_nse_index_options(index_symbol)
+    if nse_index_btn:
+        with st.spinner(f"Fetching {nse_index} options..."):
+            df, spot, error = fetch_nse_options(nse_index, is_index=True)
             
-            if df is not None and not df.empty:
-                st.success(f"✅ Fetched {len(df)} REAL traded options! Spot: ₹{spot:.2f}")
+            if df is not None:
+                st.success(f"✅ Fetched {len(df)} options! Index: ₹{spot:.2f}")
                 df = add_theoretical_greeks(df)
-                st.session_state['options_df'] = df
+                st.session_state['df'] = df
                 st.session_state['spot'] = spot
             else:
-                st.error("❌ No options data found. Try again.")
+                st.error(f"❌ {error}")
 
 with tab3:
-    st.subheader("US & Global Options (via Yahoo Finance)")
-    st.info("Examples: AAPL, TSLA, MSFT, GOOGL, SPY, QQQ, NVDA, etc.")
+    st.subheader("US & Global Options (Yahoo Finance)")
+    st.success("✅ This source works reliably!")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        yahoo_sym = st.text_input("Symbol", "AAPL", help="Examples: AAPL, TSLA, MSFT, GOOGL, SPY, QQQ, NVDA").upper()
+    with col2:
+        st.write("")
+        st.write("")
+        yahoo_btn = st.button("Fetch Yahoo", type="primary", key="btn3")
     
-    yahoo_symbol = st.text_input("Enter Symbol", "AAPL", key="yahoo").upper()
-    
-    if st.button("Fetch Yahoo Options", type="primary", key="btn_yahoo"):
-        with st.spinner(f"Fetching REAL options for {yahoo_symbol}..."):
-            df, spot = fetch_yahoo_options(yahoo_symbol)
+    if yahoo_btn:
+        with st.spinner(f"Fetching {yahoo_sym} options..."):
+            df, spot, error = fetch_yahoo_options(yahoo_sym)
             
-            if df is not None and not df.empty:
-                st.success(f"✅ Fetched {len(df)} REAL traded options! Spot: ${spot:.2f}")
+            if df is not None:
+                st.success(f"✅ Fetched {len(df)} options! Spot: ${spot:.2f}")
                 df = add_theoretical_greeks(df)
-                st.session_state['options_df'] = df
+                st.session_state['df'] = df
                 st.session_state['spot'] = spot
             else:
-                st.error("❌ No options data. Symbol may not have listed options.")
+                st.error(f"❌ {error}")
+                st.info("💡 Make sure the symbol has listed options. Try popular stocks like AAPL, TSLA, SPY, QQQ")
 
-if 'options_df' in st.session_state and st.session_state['options_df'] is not None:
+if 'df' in st.session_state and st.session_state['df'] is not None:
     st.markdown("---")
-    st.subheader("📈 Live Options Chain")
+    st.subheader("📈 Options Chain")
     
-    df = st.session_state['options_df']
+    df = st.session_state['df']
     
-    col1, col2, col3 = st.columns([2, 1, 1])
-    
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
     with col1:
         search = st.text_input("🔍 Search", placeholder="Strike, expiry, code...")
     with col2:
-        filter_type = st.selectbox("Type", ["All", "CALL", "PUT"])
+        filt_type = st.selectbox("Type", ["All", "CALL", "PUT"])
     with col3:
-        filter_itm = st.selectbox("Money", ["All", "ITM", "OTM"])
+        filt_itm = st.selectbox("Money", ["All", "ITM", "OTM"])
+    with col4:
+        filt_exp = st.selectbox("Expiry", ["All"] + sorted(df['Expiry'].unique().tolist()))
     
     filtered = df.copy()
     
     if search:
         mask = (
             filtered['Option Code'].str.contains(search, case=False, na=False) |
-            filtered['Strike'].astype(str).str.contains(search, na=False) |
-            filtered['Expiry'].str.contains(search, case=False, na=False)
+            filtered['Strike'].astype(str).str.contains(search, na=False)
         )
         filtered = filtered[mask]
     
-    if filter_type != "All":
-        filtered = filtered[filtered['Type'] == filter_type]
+    if filt_type != "All":
+        filtered = filtered[filtered['Type'] == filt_type]
     
-    if filter_itm == "ITM":
-        filtered = filtered[filtered['ITM'] == True]
-    elif filter_itm == "OTM":
-        filtered = filtered[filtered['ITM'] == False]
+    if filt_itm == "ITM":
+        filtered = filtered[filtered['ITM']]
+    elif filt_itm == "OTM":
+        filtered = filtered[~filtered['ITM']]
     
-    col1, col2, col3, col4, col5 = st.columns(5)
+    if filt_exp != "All":
+        filtered = filtered[filtered['Expiry'] == filt_exp]
+    
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
         st.metric("Total", f"{len(filtered):,}")
     with col2:
@@ -394,54 +394,50 @@ if 'options_df' in st.session_state and st.session_state['options_df'] is not No
         st.metric("ITM", f"{len(filtered[filtered['ITM']]):,}")
     with col5:
         st.metric("Spot", f"₹{st.session_state.get('spot', 0):.2f}")
+    with col6:
+        total_vol = filtered['Volume'].sum()
+        st.metric("Total Vol", f"{total_vol:,.0f}")
     
     st.dataframe(
-        filtered.style.format({
-            'Spot Price': '₹{:.2f}',
-            'Strike': '₹{:.0f}',
-            'LTP': '₹{:.2f}',
-            'Bid': '₹{:.2f}',
-            'Ask': '₹{:.2f}',
-            'Theoretical': '₹{:.2f}',
-            'Intrinsic': '₹{:.2f}',
-            'Time Value': '₹{:.2f}',
-            'IV': '{:.2f}%',
-            'Delta': '{:.4f}',
-            'Gamma': '{:.5f}',
-            'Theta': '{:.4f}',
-            'Vega': '{:.4f}',
-            'Volume': '{:,.0f}',
-            'OI': '{:,.0f}',
-            'Change in OI': '{:,.0f}'
-        }),
+        filtered,
         use_container_width=True,
-        height=600
+        height=600,
+        column_config={
+            "Spot Price": st.column_config.NumberColumn(format="₹%.2f"),
+            "Strike": st.column_config.NumberColumn(format="₹%.0f"),
+            "LTP": st.column_config.NumberColumn(format="₹%.2f"),
+            "Change": st.column_config.NumberColumn(format="₹%.2f"),
+            "Bid": st.column_config.NumberColumn(format="₹%.2f"),
+            "Ask": st.column_config.NumberColumn(format="₹%.2f"),
+            "Theoretical": st.column_config.NumberColumn(format="₹%.2f"),
+            "Intrinsic": st.column_config.NumberColumn(format="₹%.2f"),
+            "Time Value": st.column_config.NumberColumn(format="₹%.2f"),
+            "IV": st.column_config.NumberColumn(format="%.2f%%"),
+            "Delta": st.column_config.NumberColumn(format="%.4f"),
+            "Gamma": st.column_config.NumberColumn(format="%.5f"),
+            "Theta": st.column_config.NumberColumn(format="%.4f"),
+            "Vega": st.column_config.NumberColumn(format="%.4f"),
+            "Volume": st.column_config.NumberColumn(format="%d"),
+            "OI": st.column_config.NumberColumn(format="%d"),
+        }
     )
     
     csv = filtered.to_csv(index=False)
-    st.download_button(
-        "📥 Download CSV",
-        csv,
-        f"options_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        "text/csv"
-    )
+    st.download_button("📥 Download CSV", csv, f"options_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("✅ Real Data Sources")
+st.sidebar.subheader("📊 Data Sources")
 st.sidebar.markdown("""
-**This app fetches ACTUAL options:**
+**Working:**
+- ✅ Yahoo Finance (US/Global)
 
-1. **NSE India** - Direct from NSE API
-   - Stock options
-   - Index options (NIFTY, BANKNIFTY)
-   
-2. **Yahoo Finance** - Global coverage
-   - US stocks (AAPL, TSLA, etc.)
-   - ETFs (SPY, QQQ)
-   - All markets
+**Intermittent:**
+- ⚠️ NSE API (strict access)
 
-**All data is REAL** - no generated/fake options!
+**Tip:** Use Yahoo Finance tab for reliable access to US stocks with options.
 """)
 
 st.sidebar.markdown("---")
-st.sidebar.success("✅ 100% Real Market Data!")
+if st.sidebar.button("Clear Cache"):
+    st.cache_data.clear()
+    st.success("Cache cleared!")
