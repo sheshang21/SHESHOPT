@@ -3,416 +3,423 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from scipy.stats import norm
-import requests
-import json
-import time
 
-st.set_page_config(page_title="Options Pricing", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Options Pricing Engine", page_icon="📊", layout="wide")
 
 st.markdown("""
 <style>
     .main {background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);}
-    h1 {color: #60a5fa;}
+    h1, h2, h3 {color: #60a5fa;}
+    .stAlert {background-color: rgba(30, 41, 59, 0.8);}
 </style>
 """, unsafe_allow_html=True)
 
 def black_scholes(S, K, T, r, sigma, opt_type='call'):
+    """Black-Scholes option pricing"""
     if T <= 0:
         return max(S - K, 0) if opt_type == 'call' else max(K - S, 0)
+    
     d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
     d2 = d1 - sigma*np.sqrt(T)
+    
     if opt_type == 'call':
         return S*norm.cdf(d1) - K*np.exp(-r*T)*norm.cdf(d2)
-    return K*np.exp(-r*T)*norm.cdf(-d2) - S*norm.cdf(-d1)
+    else:
+        return K*np.exp(-r*T)*norm.cdf(-d2) - S*norm.cdf(-d1)
 
 def calculate_greeks(S, K, T, r, sigma, opt_type='call'):
+    """Calculate all option Greeks"""
     if T <= 0:
-        return {'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0}
+        return {'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0}
+    
     d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+    d2 = d1 - sigma*np.sqrt(T)
+    
+    # Delta
     delta = norm.cdf(d1) if opt_type == 'call' else norm.cdf(d1) - 1
+    
+    # Gamma
     gamma = norm.pdf(d1) / (S*sigma*np.sqrt(T))
-    theta_c = (-S*norm.pdf(d1)*sigma/(2*np.sqrt(T)) - r*K*np.exp(-r*T)*norm.cdf(d1-sigma*np.sqrt(T)))/365
-    theta_p = (-S*norm.pdf(d1)*sigma/(2*np.sqrt(T)) + r*K*np.exp(-r*T)*norm.cdf(-(d1-sigma*np.sqrt(T))))/365
-    theta = theta_c if opt_type == 'call' else theta_p
-    vega = S*norm.pdf(d1)*np.sqrt(T)/100
-    return {'delta': delta, 'gamma': gamma, 'theta': theta, 'vega': vega}
-
-@st.cache_data(ttl=60)
-def fetch_stock_price_multiple_sources(symbol):
-    """Try multiple sources to get stock price"""
     
-    # Try Yahoo Finance v8
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': 'https://finance.yahoo.com/',
-            'Origin': 'https://finance.yahoo.com'
-        }
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
-                price = data['chart']['result'][0]['meta'].get('regularMarketPrice', 0)
-                if price > 0:
-                    return price, None
-    except:
-        pass
+    # Theta
+    term1 = -S*norm.pdf(d1)*sigma / (2*np.sqrt(T))
+    if opt_type == 'call':
+        theta = (term1 - r*K*np.exp(-r*T)*norm.cdf(d2)) / 365
+    else:
+        theta = (term1 + r*K*np.exp(-r*T)*norm.cdf(-d2)) / 365
     
-    # Try Yahoo v10
-    try:
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=price"
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if 'quoteSummary' in data and 'result' in data['quoteSummary']:
-                result = data['quoteSummary']['result'][0]
-                price = result.get('price', {}).get('regularMarketPrice', {}).get('raw', 0)
-                if price > 0:
-                    return price, None
-    except:
-        pass
+    # Vega
+    vega = S*norm.pdf(d1)*np.sqrt(T) / 100
     
-    return None, "Could not fetch price from any source"
-
-@st.cache_data(ttl=60)
-def fetch_options_yahoo_v1(symbol):
-    """Method 1: Yahoo v7 API"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': 'https://finance.yahoo.com/',
-            'Origin': 'https://finance.yahoo.com'
-        }
-        
-        url = f"https://query1.finance.yahoo.com/v7/finance/options/{symbol}"
-        resp = requests.get(url, headers=headers, timeout=15)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            if 'optionChain' in data and 'result' in data['optionChain'] and data['optionChain']['result']:
-                result = data['optionChain']['result'][0]
-                spot = result.get('quote', {}).get('regularMarketPrice', 0)
-                expiries = result.get('expirationDates', [])
-                
-                if spot > 0 and expiries:
-                    all_opts = []
-                    
-                    for exp_ts in expiries[:6]:  # Get first 6 expiries to avoid timeout
-                        try:
-                            url_exp = f"https://query1.finance.yahoo.com/v7/finance/options/{symbol}?date={exp_ts}"
-                            resp_exp = requests.get(url_exp, headers=headers, timeout=10)
-                            
-                            if resp_exp.status_code == 200:
-                                data_exp = resp_exp.json()
-                                opts = data_exp['optionChain']['result'][0].get('options', [])
-                                
-                                for opt in opts:
-                                    exp_date = datetime.fromtimestamp(exp_ts)
-                                    exp_label = exp_date.strftime("%d-%b-%Y")
-                                    dte = (exp_date - datetime.now()).days
-                                    
-                                    for c in opt.get('calls', []):
-                                        all_opts.append({
-                                            'Code': f"{symbol} {exp_label} {c.get('strike',0):.1f} CE",
-                                            'Symbol': symbol, 'Spot': spot, 'Strike': c.get('strike',0),
-                                            'Type': 'CALL', 'Expiry': exp_label, 'DTE': dte,
-                                            'LTP': c.get('lastPrice',0), 'Bid': c.get('bid',0), 'Ask': c.get('ask',0),
-                                            'Volume': c.get('volume',0), 'OI': c.get('openInterest',0),
-                                            'IV': c.get('impliedVolatility',0)*100, 'ITM': c.get('inTheMoney',False)
-                                        })
-                                    
-                                    for p in opt.get('puts', []):
-                                        all_opts.append({
-                                            'Code': f"{symbol} {exp_label} {p.get('strike',0):.1f} PE",
-                                            'Symbol': symbol, 'Spot': spot, 'Strike': p.get('strike',0),
-                                            'Type': 'PUT', 'Expiry': exp_label, 'DTE': dte,
-                                            'LTP': p.get('lastPrice',0), 'Bid': p.get('bid',0), 'Ask': p.get('ask',0),
-                                            'Volume': p.get('volume',0), 'OI': p.get('openInterest',0),
-                                            'IV': p.get('impliedVolatility',0)*100, 'ITM': p.get('inTheMoney',False)
-                                        })
-                        except:
-                            continue
-                    
-                    if all_opts:
-                        return pd.DataFrame(all_opts), spot, None
-        
-        return None, None, f"Yahoo v1 failed: HTTP {resp.status_code}"
-    except Exception as e:
-        return None, None, f"Yahoo v1 error: {str(e)}"
-
-@st.cache_data(ttl=60)
-def fetch_options_yahoo_v2(symbol):
-    """Method 2: Alternative Yahoo endpoint"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://finance.yahoo.com/',
-            'Origin': 'https://finance.yahoo.com',
-            'Connection': 'keep-alive'
-        }
-        
-        url = f"https://query2.finance.yahoo.com/v7/finance/options/{symbol}"
-        resp = requests.get(url, headers=headers, timeout=15)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            if 'optionChain' in data and 'result' in data['optionChain'] and data['optionChain']['result']:
-                result = data['optionChain']['result'][0]
-                spot = result.get('quote', {}).get('regularMarketPrice', 0)
-                
-                if spot > 0 and 'options' in result and result['options']:
-                    all_opts = []
-                    
-                    for opt in result['options'][:3]:  # First 3 expiries
-                        exp_ts = opt.get('expirationDate', 0)
-                        exp_date = datetime.fromtimestamp(exp_ts)
-                        exp_label = exp_date.strftime("%d-%b-%Y")
-                        dte = (exp_date - datetime.now()).days
-                        
-                        for c in opt.get('calls', []):
-                            all_opts.append({
-                                'Code': f"{symbol} {exp_label} {c.get('strike',0):.1f} CE",
-                                'Symbol': symbol, 'Spot': spot, 'Strike': c.get('strike',0),
-                                'Type': 'CALL', 'Expiry': exp_label, 'DTE': dte,
-                                'LTP': c.get('lastPrice',0), 'Bid': c.get('bid',0), 'Ask': c.get('ask',0),
-                                'Volume': c.get('volume',0), 'OI': c.get('openInterest',0),
-                                'IV': c.get('impliedVolatility',0)*100, 'ITM': c.get('inTheMoney',False)
-                            })
-                        
-                        for p in opt.get('puts', []):
-                            all_opts.append({
-                                'Code': f"{symbol} {exp_label} {p.get('strike',0):.1f} PE",
-                                'Symbol': symbol, 'Spot': spot, 'Strike': p.get('strike',0),
-                                'Type': 'PUT', 'Expiry': exp_label, 'DTE': dte,
-                                'LTP': p.get('lastPrice',0), 'Bid': p.get('bid',0), 'Ask': p.get('ask',0),
-                                'Volume': p.get('volume',0), 'OI': p.get('openInterest',0),
-                                'IV': p.get('impliedVolatility',0)*100, 'ITM': p.get('inTheMoney',False)
-                            })
-                    
-                    if all_opts:
-                        return pd.DataFrame(all_opts), spot, None
-        
-        return None, None, f"Yahoo v2 failed: HTTP {resp.status_code}"
-    except Exception as e:
-        return None, None, f"Yahoo v2 error: {str(e)}"
-
-def generate_synthetic_options(symbol, spot, num_expiries=4, r=0.05, sigma=0.30):
-    """Generate synthetic options with theoretical pricing when APIs fail"""
+    # Rho
+    if opt_type == 'call':
+        rho = K*T*np.exp(-r*T)*norm.cdf(d2) / 100
+    else:
+        rho = -K*T*np.exp(-r*T)*norm.cdf(-d2) / 100
     
+    return {'delta': delta, 'gamma': gamma, 'theta': theta, 'vega': vega, 'rho': rho}
+
+def generate_options_chain(symbol, spot, r, sigma, strikes_config, expiries_config):
+    """Generate complete options chain"""
+    
+    # Generate strikes
     strikes = []
-    atm = round(spot)
-    step = max(5, round(spot * 0.025))  # 2.5% steps
+    if strikes_config['mode'] == 'percentage':
+        for pct in strikes_config['percentages']:
+            strikes.append(round(spot * (1 + pct/100)))
+    else:  # interval mode
+        atm = round(spot / strikes_config['interval']) * strikes_config['interval']
+        for i in range(-strikes_config['count']//2, strikes_config['count']//2 + 1):
+            strike = atm + i*strikes_config['interval']
+            if strike > 0:
+                strikes.append(strike)
     
-    for i in range(-10, 11):
-        strikes.append(atm + i*step)
-    
+    # Generate expiries
     expiries = []
-    for i in range(num_expiries):
-        days = 7 + (i * 30)
+    for days in expiries_config['days']:
         exp_date = datetime.now() + timedelta(days=days)
-        expiries.append((exp_date, exp_date.strftime("%d-%b-%Y"), days))
+        expiries.append({
+            'date': exp_date,
+            'label': exp_date.strftime("%d %b %Y"),
+            'dte': days
+        })
     
-    opts = []
+    # Generate all options
+    options = []
     
-    for exp_date, exp_label, dte in expiries:
-        T = dte / 365.0
+    for exp in expiries:
+        T = exp['dte'] / 365.0
         
-        for K in strikes:
-            for opt_type, opt_label in [('call', 'CE'), ('put', 'PE')]:
-                theo = black_scholes(spot, K, T, r, sigma, opt_type)
-                intrinsic = max(spot-K, 0) if opt_type=='call' else max(K-spot, 0)
-                greeks = calculate_greeks(spot, K, T, r, sigma, opt_type)
+        for strike in strikes:
+            for opt_type in ['call', 'put']:
+                # Calculate option price and Greeks
+                price = black_scholes(spot, strike, T, r, sigma, opt_type)
+                intrinsic = max(spot-strike, 0) if opt_type=='call' else max(strike-spot, 0)
+                time_value = max(price - intrinsic, 0)
+                greeks = calculate_greeks(spot, strike, T, r, sigma, opt_type)
                 
-                # Simulate bid/ask spread
-                spread = max(0.05, theo * 0.02)
-                bid = max(0, theo - spread)
-                ask = theo + spread
+                # Simulate market data
+                spread_pct = 0.02 + (0.03 * abs(spot-strike)/spot)  # Wider spread for OTM
+                spread = max(0.05, price * spread_pct)
+                bid = max(0.01, price - spread/2)
+                ask = price + spread/2
                 
-                opts.append({
-                    'Code': f"{symbol} {exp_label} {K} {opt_label}",
-                    'Symbol': symbol, 'Spot': spot, 'Strike': K,
-                    'Type': opt_type.upper(), 'Expiry': exp_label, 'DTE': dte,
-                    'LTP': theo, 'Bid': bid, 'Ask': ask,
-                    'Volume': 0, 'OI': 0, 'IV': sigma*100,
-                    'ITM': (opt_type=='call' and spot>K) or (opt_type=='put' and spot<K),
-                    'Theoretical': theo, 'Intrinsic': intrinsic,
-                    'Time Value': max(theo-intrinsic, 0),
-                    'Delta': greeks['delta'], 'Gamma': greeks['gamma'],
-                    'Theta': greeks['theta'], 'Vega': greeks['vega']
+                # Simulate volume and OI based on moneyness
+                moneyness = abs(spot - strike) / spot
+                volume_factor = max(0.1, 1 - moneyness*5)
+                base_volume = np.random.randint(100, 5000)
+                volume = int(base_volume * volume_factor)
+                oi = int(volume * np.random.uniform(2, 10))
+                
+                itm = (opt_type=='call' and spot>strike) or (opt_type=='put' and spot<strike)
+                
+                options.append({
+                    'Option Code': f"{symbol} {exp['label']} {strike} {'CE' if opt_type=='call' else 'PE'}",
+                    'Symbol': symbol,
+                    'Spot': spot,
+                    'Strike': strike,
+                    'Type': 'CALL' if opt_type=='call' else 'PUT',
+                    'Expiry': exp['label'],
+                    'DTE': exp['dte'],
+                    'Theoretical Price': price,
+                    'LTP': price,
+                    'Bid': bid,
+                    'Ask': ask,
+                    'Spread': spread,
+                    'Volume': volume,
+                    'Open Interest': oi,
+                    'IV': sigma*100,
+                    'Intrinsic Value': intrinsic,
+                    'Time Value': time_value,
+                    'Delta': greeks['delta'],
+                    'Gamma': greeks['gamma'],
+                    'Theta': greeks['theta'],
+                    'Vega': greeks['vega'],
+                    'Rho': greeks['rho'],
+                    'ITM': itm,
+                    'Moneyness': round((spot/strike - 1)*100, 2) if opt_type=='call' else round((strike/spot - 1)*100, 2)
                 })
     
-    return pd.DataFrame(opts)
+    return pd.DataFrame(options)
 
-def add_greeks(df, r=0.05):
-    """Add Greeks to real options data"""
-    for idx, row in df.iterrows():
-        S, K = row['Spot'], row['Strike']
-        T = max(row['DTE'], 0) / 365.0
-        sigma = row['IV']/100 if row['IV']>0 else 0.30
-        opt_type = 'call' if row['Type']=='CALL' else 'put'
-        
-        theo = black_scholes(S, K, T, r, sigma, opt_type)
-        intrinsic = max(S-K, 0) if opt_type=='call' else max(K-S, 0)
-        greeks = calculate_greeks(S, K, T, r, sigma, opt_type)
-        
-        df.at[idx, 'Theoretical'] = theo
-        df.at[idx, 'Intrinsic'] = intrinsic
-        df.at[idx, 'Time Value'] = max(theo-intrinsic, 0)
-        df.at[idx, 'Delta'] = greeks['delta']
-        df.at[idx, 'Gamma'] = greeks['gamma']
-        df.at[idx, 'Theta'] = greeks['theta']
-        df.at[idx, 'Vega'] = greeks['vega']
-    
-    return df
+st.title("📊 Professional Options Pricing Engine")
+st.markdown("**Black-Scholes Model with Complete Greeks & Market Simulation**")
 
-st.title("📊 Options Pricing & Analysis")
+st.info("🎯 **No API Required!** Enter stock details below to generate a complete, professional options chain with theoretical pricing, Greeks, and simulated market data.")
 
-st.info("💡 **How it works:** Tries to fetch real market data. If APIs are blocked, generates theoretical options with Black-Scholes pricing and full Greeks.")
+# Input Section
+st.header("📝 Stock & Market Parameters")
 
-col1, col2, col3 = st.columns([2, 1, 1])
+col1, col2, col3 = st.columns(3)
 
 with col1:
     symbol = st.text_input("Stock Symbol", "AAPL", help="Enter any stock symbol").upper()
+    spot_price = st.number_input("Current Stock Price ($)", min_value=0.01, value=180.00, step=5.0, help="Enter the current market price")
 
 with col2:
-    st.write("")
-    st.write("")
-    use_synthetic = st.checkbox("Force Theoretical Mode", value=False)
+    risk_free = st.slider("Risk-Free Rate (%)", 0.0, 20.0, 5.0, 0.5, help="Treasury yield / risk-free rate") / 100
+    iv = st.slider("Implied Volatility (%)", 5.0, 150.0, 30.0, 5.0, help="Expected volatility") / 100
 
 with col3:
-    st.write("")
-    st.write("")
-    fetch_btn = st.button("🚀 Get Options", type="primary", use_container_width=True)
+    currency = st.selectbox("Currency", ["USD ($)", "INR (₹)", "EUR (€)", "GBP (£)"])
+    currency_symbol = currency.split('(')[1].strip(')')
 
-if fetch_btn:
-    with st.spinner(f"Processing {symbol}..."):
-        
-        if not use_synthetic:
-            # Try real data sources
-            st.info("Attempting to fetch real market data...")
-            
-            df, spot, err1 = fetch_options_yahoo_v1(symbol)
-            
-            if df is None:
-                st.warning(f"Method 1 failed: {err1}")
-                df, spot, err2 = fetch_options_yahoo_v2(symbol)
-                
-                if df is None:
-                    st.warning(f"Method 2 failed: {err2}")
-                    
-                    # Try to at least get the spot price
-                    spot, price_err = fetch_stock_price_multiple_sources(symbol)
-                    
-                    if spot:
-                        st.info(f"Got spot price: ${spot:.2f}. Generating theoretical options...")
-                        df = generate_synthetic_options(symbol, spot)
-                        st.session_state['mode'] = 'theoretical'
-                    else:
-                        st.error("Could not fetch any data. Using estimated price.")
-                        df = generate_synthetic_options(symbol, 100)
-                        spot = 100
-                        st.session_state['mode'] = 'estimated'
-                else:
-                    st.success(f"✅ Got {len(df)} real options from Method 2!")
-                    df = add_greeks(df)
-                    st.session_state['mode'] = 'real'
-            else:
-                st.success(f"✅ Got {len(df)} real options from Method 1!")
-                df = add_greeks(df)
-                st.session_state['mode'] = 'real'
-        else:
-            # Synthetic mode
-            spot, _ = fetch_stock_price_multiple_sources(symbol)
-            if not spot:
-                spot = 100
-            df = generate_synthetic_options(symbol, spot)
-            st.session_state['mode'] = 'theoretical'
-            st.success(f"✅ Generated {len(df)} theoretical options!")
+# Strike Configuration
+st.header("🎯 Strike Prices Configuration")
+
+strike_mode = st.radio("Strike Generation Mode", ["Percentage Based", "Interval Based"], horizontal=True)
+
+if strike_mode == "Percentage Based":
+    st.info("Generate strikes at specific percentages from current price")
+    
+    preset = st.selectbox("Preset", ["Narrow (±10%)", "Medium (±20%)", "Wide (±30%)", "Custom"])
+    
+    if preset == "Narrow (±10%)":
+        percentages = [-10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10]
+    elif preset == "Medium (±20%)":
+        percentages = [-20, -15, -10, -5, 0, 5, 10, 15, 20]
+    elif preset == "Wide (±30%)":
+        percentages = [-30, -20, -10, 0, 10, 20, 30]
+    else:
+        percentages_str = st.text_input("Enter percentages (comma-separated)", "-20,-10,-5,0,5,10,20")
+        percentages = [float(x.strip()) for x in percentages_str.split(',')]
+    
+    strikes_config = {'mode': 'percentage', 'percentages': percentages}
+    st.caption(f"Will generate {len(percentages)} strikes: {', '.join([f'{p:+.1f}%' for p in percentages])}")
+
+else:  # Interval Based
+    st.info("Generate strikes at fixed price intervals around ATM")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        strike_count = st.slider("Number of Strikes", 5, 51, 15, 2)
+    with col2:
+        strike_interval = st.number_input("Strike Interval ($)", min_value=1, value=5, step=1)
+    
+    strikes_config = {'mode': 'interval', 'count': strike_count, 'interval': strike_interval}
+    st.caption(f"Will generate {strike_count} strikes with {currency_symbol}{strike_interval} intervals")
+
+# Expiry Configuration
+st.header("📅 Expiration Dates Configuration")
+
+expiry_preset = st.selectbox("Expiry Preset", ["Weekly (4 weeks)", "Monthly (6 months)", "Quarterly (1 year)", "Custom"])
+
+if expiry_preset == "Weekly (4 weeks)":
+    expiry_days = [7, 14, 21, 28]
+elif expiry_preset == "Monthly (6 months)":
+    expiry_days = [30, 60, 90, 120, 150, 180]
+elif expiry_preset == "Quarterly (1 year)":
+    expiry_days = [90, 180, 270, 365]
+else:
+    expiry_days_str = st.text_input("Days to expiry (comma-separated)", "7,30,60,90,180,365")
+    expiry_days = [int(x.strip()) for x in expiry_days_str.split(',')]
+
+expiries_config = {'days': expiry_days}
+st.caption(f"Will generate options for {len(expiry_days)} expiry dates")
+
+# Generate Button
+st.markdown("---")
+generate = st.button("🚀 Generate Complete Options Chain", type="primary", use_container_width=True)
+
+if generate:
+    with st.spinner("Generating options chain..."):
+        df = generate_options_chain(symbol, spot_price, risk_free, iv, strikes_config, expiries_config)
         
         st.session_state['df'] = df
-        st.session_state['spot'] = spot
+        st.session_state['spot'] = spot_price
         st.session_state['symbol'] = symbol
+        st.session_state['currency'] = currency_symbol
+        
+        st.success(f"✅ Generated {len(df):,} options contracts!")
+        st.balloons()
 
-if 'df' in st.session_state:
+# Display Options Chain
+if 'df' in st.session_state and st.session_state['df'] is not None:
     st.markdown("---")
-    
-    mode = st.session_state.get('mode', 'unknown')
-    if mode == 'real':
-        st.success("📊 **Real Market Data** - Actual traded options with live prices")
-    elif mode == 'theoretical':
-        st.info("🧮 **Theoretical Mode** - Black-Scholes pricing with full Greeks")
-    elif mode == 'estimated':
-        st.warning("⚠️ **Estimated Mode** - Using estimated price and theoretical options")
+    st.header(f"📈 Options Chain: {st.session_state['symbol']}")
     
     df = st.session_state['df']
+    curr = st.session_state['currency']
     
+    # Filters
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        search = st.text_input("🔍 Search", placeholder="Strike, expiry...")
-    with col2:
-        type_f = st.selectbox("Type", ["All", "CALL", "PUT"])
-    with col3:
-        itm_f = st.selectbox("Money", ["All", "ITM", "OTM"])
-    with col4:
-        exp_f = st.selectbox("Expiry", ["All"] + sorted(df['Expiry'].unique().tolist()))
     
+    with col1:
+        search = st.text_input("🔍 Search", placeholder="Strike, code, expiry...")
+    with col2:
+        type_filter = st.selectbox("Type", ["All", "CALL", "PUT"])
+    with col3:
+        money_filter = st.selectbox("Moneyness", ["All", "ITM", "ATM (±5%)", "OTM"])
+    with col4:
+        expiry_filter = st.selectbox("Expiry", ["All"] + sorted(df['Expiry'].unique().tolist()))
+    
+    # Apply filters
     filtered = df.copy()
     
     if search:
-        mask = filtered['Code'].str.contains(search, case=False, na=False) | filtered['Strike'].astype(str).str.contains(search, na=False)
+        mask = (
+            filtered['Option Code'].str.contains(search, case=False, na=False) |
+            filtered['Strike'].astype(str).str.contains(search, na=False) |
+            filtered['Expiry'].str.contains(search, case=False, na=False)
+        )
         filtered = filtered[mask]
     
-    if type_f != "All":
-        filtered = filtered[filtered['Type']==type_f]
+    if type_filter != "All":
+        filtered = filtered[filtered['Type'] == type_filter]
     
-    if itm_f == "ITM":
+    if money_filter == "ITM":
         filtered = filtered[filtered['ITM']]
-    elif itm_f == "OTM":
+    elif money_filter == "OTM":
         filtered = filtered[~filtered['ITM']]
+    elif money_filter == "ATM (±5%)":
+        filtered = filtered[abs(filtered['Moneyness']) <= 5]
     
-    if exp_f != "All":
-        filtered = filtered[filtered['Expiry']==exp_f]
+    if expiry_filter != "All":
+        filtered = filtered[filtered['Expiry'] == expiry_filter]
     
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Metrics
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
-        st.metric("Total", f"{len(filtered):,}")
+        st.metric("Total Options", f"{len(filtered):,}")
     with col2:
-        st.metric("Calls", f"{len(filtered[filtered['Type']=='CALL']):,}")
+        st.metric("Call Options", f"{len(filtered[filtered['Type']=='CALL']):,}")
     with col3:
-        st.metric("Puts", f"{len(filtered[filtered['Type']=='PUT']):,}")
+        st.metric("Put Options", f"{len(filtered[filtered['Type']=='PUT']):,}")
     with col4:
-        st.metric("ITM", f"{len(filtered[filtered['ITM']]):,}")
+        st.metric("ITM Options", f"{len(filtered[filtered['ITM']]):,}")
     with col5:
-        st.metric("Spot", f"${st.session_state['spot']:.2f}")
+        st.metric("Spot Price", f"{curr}{st.session_state['spot']:.2f}")
+    with col6:
+        total_vol = filtered['Volume'].sum()
+        st.metric("Total Volume", f"{total_vol:,}")
     
-    st.dataframe(filtered, use_container_width=True, height=600)
+    # Display DataFrame
+    display_cols = [
+        'Option Code', 'Strike', 'Type', 'Expiry', 'DTE',
+        'Theoretical Price', 'LTP', 'Bid', 'Ask', 'Spread',
+        'Volume', 'Open Interest', 'IV',
+        'Intrinsic Value', 'Time Value',
+        'Delta', 'Gamma', 'Theta', 'Vega', 'Rho'
+    ]
     
+    st.dataframe(
+        filtered[display_cols],
+        use_container_width=True,
+        height=600,
+        column_config={
+            "Strike": st.column_config.NumberColumn(format=f"{curr}%.2f"),
+            "Theoretical Price": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "LTP": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Bid": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Ask": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Spread": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Intrinsic Value": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Time Value": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "IV": st.column_config.NumberColumn(format="%.2f%%"),
+            "Delta": st.column_config.NumberColumn(format="%.4f"),
+            "Gamma": st.column_config.NumberColumn(format="%.5f"),
+            "Theta": st.column_config.NumberColumn(format="%.4f"),
+            "Vega": st.column_config.NumberColumn(format="%.4f"),
+            "Rho": st.column_config.NumberColumn(format="%.4f"),
+        }
+    )
+    
+    # Download
     csv = filtered.to_csv(index=False)
-    st.download_button("📥 Download CSV", csv, f"options_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
+    st.download_button(
+        "📥 Download Complete Data as CSV",
+        csv,
+        f"{st.session_state['symbol']}_options_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        "text/csv",
+        use_container_width=True
+    )
+    
+    # Analytics
+    st.markdown("---")
+    st.header("📊 Options Analytics")
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["Volume Analysis", "Open Interest", "Greeks Heatmap", "Volatility Smile"])
+    
+    with tab1:
+        st.subheader("Top 10 by Volume")
+        top_vol = filtered.nlargest(10, 'Volume')[['Option Code', 'Type', 'Strike', 'LTP', 'Volume', 'Open Interest']]
+        st.dataframe(top_vol, use_container_width=True)
+    
+    with tab2:
+        st.subheader("Top 10 by Open Interest")
+        top_oi = filtered.nlargest(10, 'Open Interest')[['Option Code', 'Type', 'Strike', 'LTP', 'Volume', 'Open Interest']]
+        st.dataframe(top_oi, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Greeks Summary by Expiry")
+        greeks_summary = filtered.groupby('Expiry').agg({
+            'Delta': 'mean',
+            'Gamma': 'mean',
+            'Theta': 'mean',
+            'Vega': 'mean'
+        }).round(4)
+        st.dataframe(greeks_summary, use_container_width=True)
+    
+    with tab4:
+        st.subheader("IV by Strike (Volatility Smile)")
+        iv_by_strike = filtered.groupby(['Strike', 'Type'])['IV'].mean().reset_index()
+        st.dataframe(iv_by_strike, use_container_width=True)
+
+else:
+    st.info("👆 Configure parameters above and click 'Generate Complete Options Chain' to start!")
+    
+    st.markdown("### 💡 What You Get:")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("""
+        **Pricing Models**
+        - Black-Scholes theoretical prices
+        - Intrinsic value calculation
+        - Time value decomposition
+        - Bid/ask spread simulation
+        """)
+    
+    with col2:
+        st.markdown("""
+        **Complete Greeks**
+        - Delta (price sensitivity)
+        - Gamma (delta sensitivity)
+        - Theta (time decay)
+        - Vega (volatility sensitivity)
+        - Rho (rate sensitivity)
+        """)
+    
+    with col3:
+        st.markdown("""
+        **Market Data**
+        - Simulated volume
+        - Open interest estimates
+        - ITM/OTM classification
+        - Moneyness calculation
+        """)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("ℹ️ About")
+st.sidebar.subheader("📖 About This Tool")
 st.sidebar.markdown("""
-**This app:**
-1. Tries multiple APIs for real data
-2. Falls back to theoretical pricing
-3. Always shows full Greeks
-4. Works even when APIs fail
+**Options Pricing Engine**
 
-**Theoretical mode includes:**
-- Black-Scholes pricing
-- Delta, Gamma, Theta, Vega
-- Intrinsic & Time Value
-- Realistic bid/ask spreads
+A professional-grade options analysis tool using the Black-Scholes model.
+
+**Features:**
+- ✅ No API required
+- ✅ Complete options chains
+- ✅ All Greeks calculated
+- ✅ Customizable parameters
+- ✅ Market data simulation
+- ✅ CSV export
+
+**Perfect for:**
+- Options strategy planning
+- Risk analysis
+- Educational purposes
+- Backtesting strategies
 """)
 
-if st.sidebar.button("🔄 Clear Cache"):
-    st.cache_data.clear()
-    st.success("Cleared!")
+st.sidebar.markdown("---")
+st.sidebar.info("💡 **Tip:** Adjust IV to match market conditions for more accurate pricing!")
