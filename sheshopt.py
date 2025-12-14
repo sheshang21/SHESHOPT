@@ -236,10 +236,193 @@ if generate:
 # Display Options Chain
 if 'df' in st.session_state and st.session_state['df'] is not None:
     st.markdown("---")
-    st.header(f"📈 Options Chain: {st.session_state['symbol']}")
+    st.header(f"📈 Options Chain: {st.session_state.get('symbol', 'N/A')}")
     
     df = st.session_state['df']
-    curr = st.session_state['currency']
+    curr = st.session_state.get('currency', '
+    
+    # Filters
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        search = st.text_input("🔍 Search", placeholder="Strike, code, expiry...")
+    with col2:
+        type_filter = st.selectbox("Type", ["All", "CALL", "PUT"])
+    with col3:
+        money_filter = st.selectbox("Moneyness", ["All", "ITM", "ATM (±5%)", "OTM"])
+    with col4:
+        expiry_filter = st.selectbox("Expiry", ["All"] + sorted(df['Expiry'].unique().tolist()))
+    
+    # Apply filters
+    filtered = df.copy()
+    
+    if search:
+        mask = (
+            filtered['Option Code'].str.contains(search, case=False, na=False) |
+            filtered['Strike'].astype(str).str.contains(search, na=False) |
+            filtered['Expiry'].str.contains(search, case=False, na=False)
+        )
+        filtered = filtered[mask]
+    
+    if type_filter != "All":
+        filtered = filtered[filtered['Type'] == type_filter]
+    
+    if money_filter == "ITM":
+        filtered = filtered[filtered['ITM']]
+    elif money_filter == "OTM":
+        filtered = filtered[~filtered['ITM']]
+    elif money_filter == "ATM (±5%)":
+        filtered = filtered[abs(filtered['Moneyness']) <= 5]
+    
+    if expiry_filter != "All":
+        filtered = filtered[filtered['Expiry'] == expiry_filter]
+    
+    # Metrics
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    with col1:
+        st.metric("Total Options", f"{len(filtered):,}")
+    with col2:
+        st.metric("Call Options", f"{len(filtered[filtered['Type']=='CALL']):,}")
+    with col3:
+        st.metric("Put Options", f"{len(filtered[filtered['Type']=='PUT']):,}")
+    with col4:
+        st.metric("ITM Options", f"{len(filtered[filtered['ITM']]):,}")
+    with col5:
+        st.metric("Spot Price", f"{curr}{st.session_state.get('spot', 0):.2f}")
+    with col6:
+        total_vol = filtered['Volume'].sum()
+        st.metric("Total Volume", f"{total_vol:,}")
+    
+    # Display DataFrame
+    display_cols = [
+        'Option Code', 'Strike', 'Type', 'Expiry', 'DTE',
+        'Theoretical Price', 'LTP', 'Bid', 'Ask', 'Spread',
+        'Volume', 'Open Interest', 'IV',
+        'Intrinsic Value', 'Time Value',
+        'Delta', 'Gamma', 'Theta', 'Vega', 'Rho'
+    ]
+    
+    st.dataframe(
+        filtered[display_cols],
+        use_container_width=True,
+        height=600,
+        column_config={
+            "Strike": st.column_config.NumberColumn(format=f"{curr}%.2f"),
+            "Theoretical Price": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "LTP": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Bid": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Ask": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Spread": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Intrinsic Value": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "Time Value": st.column_config.NumberColumn(format=f"{curr}%.3f"),
+            "IV": st.column_config.NumberColumn(format="%.2f%%"),
+            "Delta": st.column_config.NumberColumn(format="%.4f"),
+            "Gamma": st.column_config.NumberColumn(format="%.5f"),
+            "Theta": st.column_config.NumberColumn(format="%.4f"),
+            "Vega": st.column_config.NumberColumn(format="%.4f"),
+            "Rho": st.column_config.NumberColumn(format="%.4f"),
+        }
+    )
+    
+    # Download
+    csv = filtered.to_csv(index=False)
+    st.download_button(
+        "📥 Download Complete Data as CSV",
+        csv,
+        f"{st.session_state.get('symbol', 'options')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        "text/csv",
+        use_container_width=True
+    )
+    
+    # Analytics
+    st.markdown("---")
+    st.header("📊 Options Analytics")
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["Volume Analysis", "Open Interest", "Greeks Heatmap", "Volatility Smile"])
+    
+    with tab1:
+        st.subheader("Top 10 by Volume")
+        top_vol = filtered.nlargest(10, 'Volume')[['Option Code', 'Type', 'Strike', 'LTP', 'Volume', 'Open Interest']]
+        st.dataframe(top_vol, use_container_width=True)
+    
+    with tab2:
+        st.subheader("Top 10 by Open Interest")
+        top_oi = filtered.nlargest(10, 'Open Interest')[['Option Code', 'Type', 'Strike', 'LTP', 'Volume', 'Open Interest']]
+        st.dataframe(top_oi, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Greeks Summary by Expiry")
+        greeks_summary = filtered.groupby('Expiry').agg({
+            'Delta': 'mean',
+            'Gamma': 'mean',
+            'Theta': 'mean',
+            'Vega': 'mean'
+        }).round(4)
+        st.dataframe(greeks_summary, use_container_width=True)
+    
+    with tab4:
+        st.subheader("IV by Strike (Volatility Smile)")
+        iv_by_strike = filtered.groupby(['Strike', 'Type'])['IV'].mean().reset_index()
+        st.dataframe(iv_by_strike, use_container_width=True)
+
+else:
+    st.info("👆 Configure parameters above and click 'Generate Complete Options Chain' to start!")
+    
+    st.markdown("### 💡 What You Get:")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("""
+        **Pricing Models**
+        - Black-Scholes theoretical prices
+        - Intrinsic value calculation
+        - Time value decomposition
+        - Bid/ask spread simulation
+        """)
+    
+    with col2:
+        st.markdown("""
+        **Complete Greeks**
+        - Delta (price sensitivity)
+        - Gamma (delta sensitivity)
+        - Theta (time decay)
+        - Vega (volatility sensitivity)
+        - Rho (rate sensitivity)
+        """)
+    
+    with col3:
+        st.markdown("""
+        **Market Data**
+        - Simulated volume
+        - Open interest estimates
+        - ITM/OTM classification
+        - Moneyness calculation
+        """)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📖 About This Tool")
+st.sidebar.markdown("""
+**Options Pricing Engine**
+
+A professional-grade options analysis tool using the Black-Scholes model.
+
+**Features:**
+- ✅ No API required
+- ✅ Complete options chains
+- ✅ All Greeks calculated
+- ✅ Customizable parameters
+- ✅ Market data simulation
+- ✅ CSV export
+
+**Perfect for:**
+- Options strategy planning
+- Risk analysis
+- Educational purposes
+- Backtesting strategies
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.info("💡 **Tip:** Adjust IV to match market conditions for more accurate pricing!"))
     
     # Filters
     col1, col2, col3, col4 = st.columns(4)
